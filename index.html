@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GeoMeasure GPS — Medidor de terrenos</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+:root{color-scheme:light;--green:#15803d;--blue:#2563eb;--line:#d1d5db}
+*{box-sizing:border-box}
+body{margin:0;font:16px system-ui,-apple-system,Segoe UI,sans-serif;background:#f3f4f6;color:#172033}
+main{max-width:850px;margin:auto;padding:16px}
+header{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:14px}
+h1{font-size:1.35rem;margin:0}
+.sub{font-size:.85rem;color:#64748b;margin-top:3px}
+.pill{font-size:.75rem;border-radius:999px;padding:6px 10px;background:#fef3c7;color:#92400e}
+#map{height: min(58vh,520px);min-height:300px;border-radius:14px;border:1px solid var(--line);z-index:0}
+.metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:12px 0}
+.metric,.panel{background:white;border:1px solid var(--line);border-radius:12px;padding:12px}
+.metric small{display:block;color:#64748b}
+.metric strong{font-size:1.35rem}
+.controls{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:12px 0}
+button{border:1px solid var(--line);background:white;color:#172033;border-radius:10px;padding:12px;font-weight:650;font-size:.92rem}
+button.primary{background:var(--green);border-color:var(--green);color:white}
+button.blue{background:var(--blue);border-color:var(--blue);color:white}
+button:disabled{opacity:.45}
+.panel{font-size:.9rem;line-height:1.55;margin:10px 0}
+#message{color:#334155}
+.muted{color:#64748b;font-size:.78rem}
+@media(min-width:620px){.controls{grid-template-columns:repeat(3,minmax(0,1fr))}.metrics{grid-template-columns:repeat(4,minmax(0,1fr))}}
+</style>
+</head>
+<body>
+<main>
+<header>
+ <div><h1>📍 GeoMeasure GPS</h1><div class="sub">Medição geográfica de terrenos</div></div>
+ <span id="gpsStatus" class="pill">GPS desligado</span>
+</header>
+<div id="map" aria-label="Mapa para medir terreno"></div>
+<section class="metrics">
+ <div class="metric"><small>Área</small><strong id="area">0 m²</strong></div>
+ <div class="metric"><small>Perímetro</small><strong id="perimeter">0 m</strong></div>
+ <div class="metric"><small>Precisão GPS</small><strong id="accuracy">—</strong></div>
+ <div class="metric"><small>Pontos</small><strong id="count">0</strong></div>
+</section>
+<section class="controls">
+ <button id="locate" class="blue">◎ Minha localização</button>
+ <button id="start" class="primary">▶ Iniciar caminhada</button>
+ <button id="stop" disabled>■ Parar caminhada</button>
+ <button id="close">Fechar polígono</button>
+ <button id="undo">↶ Desfazer ponto</button>
+ <button id="clear">Limpar medição</button>
+ <button id="addCurrent">Marcar posição atual</button>
+ <button id="export">Exportar CSV</button>
+</section>
+<section class="panel">
+ <strong>Posição atual</strong><br>
+ Latitude: <span id="lat">—</span><br>
+ Longitude: <span id="lng">—</span><br>
+ Área em hectares: <strong id="hectares">0</strong><br>
+ <div id="message" role="status" aria-live="polite">Toque em “Minha localização” e permita o acesso ao GPS. Você também pode tocar no mapa para marcar pontos manualmente.</div>
+</section>
+<p class="muted">O GPS do celular fornece uma estimativa e pode variar conforme o aparelho, céu aberto e obstáculos. Esta ferramenta não substitui levantamento topográfico profissional. Mapa © OpenStreetMap contributors.</p>
+</main>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+(() => {
+ const $ = id => document.getElementById(id);
+ const status = (s,ok=false) => { $('gpsStatus').textContent=s; $('gpsStatus').style.background=ok?'#dcfce7':'#fef3c7'; $('gpsStatus').style.color=ok?'#166534':'#92400e'; };
+ const map = L.map('map').setView([-14.235,-51.925],4);
+ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
+   maxZoom:20, attribution:'© OpenStreetMap contributors'
+ }).addTo(map);
+ let points=[], markers=[], line=null, polygon=null, current=null, watchId=null, closed=false, userMarker=null, lastRecorded=null;
+ const R=6371008.8;
+ function distance(a,b){
+   const rad=x=>x*Math.PI/180, p1=rad(a.lat),p2=rad(b.lat),dp=rad(b.lat-a.lat),dl=rad(b.lng-a.lng);
+   const h=Math.sin(dp/2)**2+Math.cos(p1)*Math.cos(p2)*Math.sin(dl/2)**2;
+   return 2*R*Math.asin(Math.sqrt(h));
+ }
+ function areaMeters(){
+   if(!closed||points.length<3)return 0;
+   const lat0=points.reduce((s,p)=>s+p.lat,0)/points.length*Math.PI/180;
+   const xy=points.map(p=>({x:R*p.lng*Math.PI/180*Math.cos(lat0),y:R*p.lat*Math.PI/180}));
+   let sum=0;
+   for(let i=0;i<xy.length;i++){const a=xy[i],b=xy[(i+1)%xy.length];sum+=a.x*b.y-b.x*a.y;}
+   return Math.abs(sum/2);
+ }
+ function perimeter(){
+   if(points.length<2)return 0;
+   let sum=0;
+   for(let i=0;i<points.length-1;i++)sum+=distance(points[i],points[i+1]);
+   if(closed)sum+=distance(points[points.length-1],points[0]);
+   return sum;
+ }
+ function fmt(n,d=2){return n.toLocaleString('pt-BR',{maximumFractionDigits:d});}
+ function render(){
+   markers.forEach(m=>map.removeLayer(m));markers=[];
+   if(line){map.removeLayer(line);line=null;}
+   if(polygon){map.removeLayer(polygon);polygon=null;}
+   points.forEach((p,i)=>markers.push(L.circleMarker([p.lat,p.lng],{radius:6,color:'#fff',weight:2,fillColor:'#15803d',fillOpacity:1}).addTo(map).bindTooltip('Ponto '+(i+1))));
+   if(points.length>1)line=L.polyline(points.map(p=>[p.lat,p.lng]),{color:'#15803d',weight:3,dashArray:closed?null:'7 6'}).addTo(map);
+   if(closed&&points.length>=3)polygon=L.polygon(points.map(p=>[p.lat,p.lng]),{color:'#15803d',fillColor:'#22c55e',fillOpacity:.2}).addTo(map);
+   const a=areaMeters(),p=perimeter();
+   $('area').textContent=fmt(a)+' m²';$('perimeter').textContent=fmt(p)+' m';
+   $('hectares').textContent=fmt(a/10000,5);$('count').textContent=points.length;
+ }
+ function addPoint(p){
+   if(closed){$('message').textContent='O polígono está fechado. Desfaça ou limpe para continuar.';return;}
+   if(points.length && distance(points[points.length-1],p)<1.5)return;
+   points.push({lat:p.lat,lng:p.lng,accuracy:p.accuracy||null});render();
+ }
+ function onPosition(pos){
+   const c={lat:pos.coords.latitude,lng:pos.coords.longitude,accuracy:pos.coords.accuracy};
+   current=c;$('lat').textContent=c.lat.toFixed(7);$('lng').textContent=c.lng.toFixed(7);
+   $('accuracy').textContent='±'+Math.round(c.accuracy)+' m';status('GPS ativo',true);
+   if(!userMarker)userMarker=L.circleMarker([c.lat,c.lng],{radius:8,color:'#fff',weight:3,fillColor:'#2563eb',fillOpacity:1}).addTo(map).bindTooltip('Sua posição');
+   else userMarker.setLatLng([c.lat,c.lng]);
+   if(!map._geoCentered){map.setView([c.lat,c.lng],18);map._geoCentered=true;}
+   if(watchId!==null && c.accuracy<=25 && (!lastRecorded||distance(lastRecorded,c)>=3)){
+     addPoint(c);lastRecorded=c;
+   }
+ }
+ function onError(e){
+   const msg=e.code===1?'Permissão negada. Autorize a localização nas configurações do navegador.':e.code===2?'Localização indisponível. Verifique o GPS.':'Tempo esgotado ao obter localização.';
+   $('message').textContent=msg;status('GPS indisponível');
+ }
+ function locate(){
+   if(!navigator.geolocation){$('message').textContent='Este navegador não oferece geolocalização.';return;}
+   $('message').textContent='Solicitando sua localização…';
+   navigator.geolocation.getCurrentPosition(p=>{onPosition(p);$('message').textContent='Localização encontrada. Precisão aproximada: '+Math.round(p.coords.accuracy)+' metros.';},onError,{enableHighAccuracy:true,timeout:20000,maximumAge:0});
+ }
+ function start(){
+   if(!navigator.geolocation){$('message').textContent='GPS não disponível neste navegador.';return;}
+   if(watchId!==null)return;
+   closed=false;lastRecorded=points.length?points[points.length-1]:null;
+   watchId=navigator.geolocation.watchPosition(p=>{
+     onPosition(p);
+     $('message').textContent=p.coords.accuracy>25?'Precisão baixa ('+Math.round(p.coords.accuracy)+' m). Aguarde sinal melhor.':'Caminhada registrando pontos GPS. Siga pelo contorno do terreno.';
+   },onError,{enableHighAccuracy:true,maximumAge:1000,timeout:20000});
+   $('start').disabled=true;$('stop').disabled=false;status('Registrando',true);
+ }
+ function stop(){
+   if(watchId!==null)navigator.geolocation.clearWatch(watchId);
+   watchId=null;$('start').disabled=false;$('stop').disabled=true;status('GPS em espera');
+   $('message').textContent='Caminhada parada. Feche o polígono para calcular a área.';
+ }
+ $('locate').onclick=locate;
+ $('start').onclick=start;
+ $('stop').onclick=stop;
+ $('addCurrent').onclick=()=>current?addPoint(current):locate();
+ $('close').onclick=()=>{
+   if(points.length<3){$('message').textContent='Marque pelo menos 3 pontos para fechar a área.';return;}
+   stop();closed=true;render();$('message').textContent='Área delimitada. Confira os pontos e a precisão antes de usar o resultado.';
+ };
+ $('undo').onclick=()=>{if(closed)closed=false;points.pop();lastRecorded=points.length?points[points.length-1]:null;render();};
+ $('clear').onclick=()=>{stop();points=[];closed=false;lastRecorded=null;render();$('message').textContent='Medição apagada. Toque no mapa ou registre uma nova caminhada.';};
+ map.on('click',e=>{addPoint({lat:e.latlng.lat,lng:e.latlng.lng});$('message').textContent='Ponto manual adicionado. Para medir com GPS, use “Iniciar caminhada”.';});
+ $('export').onclick=()=>{
+   const rows=[['ponto','latitude','longitude','precisao_m'],...points.map((p,i)=>[i+1,p.lat,p.lng,p.accuracy??''])];
+   const csv=rows.map(r=>r.join(';')).join('\n')+'\n\narea_m2;'+areaMeters()+'\nperimetro_m;'+perimeter();
+   const blob=new Blob(['\ufeff'+csv],{type:'text/csv;charset=utf-8'}),url=URL.createObjectURL(blob),a=document.createElement('a');
+   a.href=url;a.download='medicao-geomeasure.csv';a.click();URL.revokeObjectURL(url);
+ };
+ render();
+})();
+</script>
+</body>
+</html>
