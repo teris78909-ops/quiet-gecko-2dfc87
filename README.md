@@ -16,6 +16,24 @@ navigator.geolocation.watchPosition(
     maximumAge: 0,
     timeout: 20000
   }
+);navigator.geolocation.watchPosition(
+  (position) => {
+    const latitude = position.coords.latitude;
+    const longitude = position.coords.longitude;
+    const precisao = position.coords.accuracy;
+
+    console.log("Latitude:", latitude);
+    console.log("Longitude:", longitude);
+    console.log("Precisão:", precisao, "metros");
+  },
+  (error) => {
+    console.error("Erro GPS:", error.message);
+  },
+  {
+    enableHighAccuracy: true,
+    maximumAge: 0,
+    timeout: 20000
+  }
 );
 <!DOCTYPE html>
 <html lang="pt-BR">
